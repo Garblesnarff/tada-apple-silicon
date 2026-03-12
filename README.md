@@ -8,7 +8,7 @@ TADA is a 1 billion parameter TTS model built on Llama 3.2. It was designed for 
 
 ```bash
 # Clone and set up
-git clone https://github.com/YOUR_USERNAME/tada-apple-silicon.git
+git clone https://github.com/Garblesnarff/tada-apple-silicon.git
 cd tada-apple-silicon
 python3.12 -m venv .venv
 source .venv/bin/activate
