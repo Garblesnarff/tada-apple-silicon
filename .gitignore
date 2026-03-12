@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Audio output
+*.wav
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# HuggingFace cache
+.cache/
