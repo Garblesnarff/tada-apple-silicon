@@ -19,3 +19,7 @@ venv/
 
 # HuggingFace cache
 .cache/
+
+# MLX converted weights
+mlx-weights/
+*.safetensors

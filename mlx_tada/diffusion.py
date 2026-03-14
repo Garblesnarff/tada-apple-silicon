@@ -1,0 +1,158 @@
+"""MLX implementation of VibeVoice diffusion head."""
+
+import math
+import mlx.core as mx
+import mlx.nn as nn
+
+
+class RMSNorm(nn.Module):
+    """RMS normalization."""
+
+    def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine: bool = True):
+        super().__init__()
+        self.eps = eps
+        self.elementwise_affine = elementwise_affine
+        if elementwise_affine:
+            self.weight = mx.ones((dim,))
+
+    def __call__(self, x: mx.array) -> mx.array:
+        dtype = x.dtype
+        x = x.astype(mx.float32)
+        norm = x * mx.rsqrt(mx.mean(x * x, axis=-1, keepdims=True) + self.eps)
+        norm = norm.astype(dtype)
+        if self.elementwise_affine:
+            norm = norm * self.weight
+        return norm
+
+
+class TimestepEmbedder(nn.Module):
+    """Embeds scalar timesteps into vector representations."""
+
+    def __init__(self, hidden_size: int, frequency_embedding_size: int = 256):
+        super().__init__()
+        self.linear1 = nn.Linear(frequency_embedding_size, hidden_size, bias=False)
+        self.linear2 = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.frequency_embedding_size = frequency_embedding_size
+
+    @staticmethod
+    def timestep_embedding(t: mx.array, dim: int, max_period: int = 10000) -> mx.array:
+        """Create sinusoidal timestep embeddings."""
+        half = dim // 2
+        freqs = mx.exp(
+            -math.log(max_period)
+            * mx.arange(0, half, dtype=mx.float32)
+            / half
+        )
+        args = t[:, None].astype(mx.float32) * freqs[None]
+        embedding = mx.concatenate([mx.cos(args), mx.sin(args)], axis=-1)
+        if dim % 2:
+            embedding = mx.concatenate(
+                [embedding, mx.zeros_like(embedding[:, :1])], axis=-1
+            )
+        return embedding.astype(t.dtype)
+
+    def __call__(self, t: mx.array) -> mx.array:
+        t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
+        return self.linear2(nn.silu(self.linear1(t_freq)))
+
+
+class FeedForwardNetwork(nn.Module):
+    """SwiGLU feed-forward network."""
+
+    def __init__(self, embed_dim: int, ffn_dim: int):
+        super().__init__()
+        self.gate_proj = nn.Linear(embed_dim, ffn_dim, bias=False)
+        self.up_proj = nn.Linear(embed_dim, ffn_dim, bias=False)
+        self.down_proj = nn.Linear(ffn_dim, embed_dim, bias=False)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return self.down_proj(nn.silu(self.gate_proj(x)) * self.up_proj(x))
+
+
+class HeadLayer(nn.Module):
+    """A layer in the diffusion head with AdaLN modulation."""
+
+    def __init__(self, embed_dim: int, ffn_dim: int, cond_dim: int, norm_eps: float = 1e-5):
+        super().__init__()
+        self.ffn = FeedForwardNetwork(embed_dim, ffn_dim)
+        self.norm = RMSNorm(embed_dim, eps=norm_eps)
+        # AdaLN modulation: SiLU + Linear -> 3 * embed_dim (shift, scale, gate)
+        self.adaLN_linear = nn.Linear(cond_dim, 3 * embed_dim, bias=False)
+
+    def __call__(self, x: mx.array, c: mx.array) -> mx.array:
+        modulation = self.adaLN_linear(nn.silu(c))
+        shift_ffn, scale_ffn, gate_ffn = mx.split(modulation, 3, axis=-1)
+        normed = self.norm(x)
+        modulated = normed * (1 + scale_ffn) + shift_ffn
+        x = x + gate_ffn * self.ffn(modulated)
+        return x
+
+
+class FinalLayer(nn.Module):
+    """Final layer with AdaLN modulation."""
+
+    def __init__(self, hidden_size: int, output_size: int, cond_size: int, norm_eps: float = 1e-5):
+        super().__init__()
+        self.norm_final = RMSNorm(hidden_size, eps=norm_eps, elementwise_affine=False)
+        self.linear = nn.Linear(hidden_size, output_size, bias=False)
+        self.adaLN_linear = nn.Linear(cond_size, 2 * hidden_size, bias=False)
+
+    def __call__(self, x: mx.array, c: mx.array) -> mx.array:
+        modulation = self.adaLN_linear(nn.silu(c))
+        shift, scale = mx.split(modulation, 2, axis=-1)
+        x = self.norm_final(x) * (1 + scale) + shift
+        return self.linear(x)
+
+
+class VibeVoiceDiffusionHead(nn.Module):
+    """MLX implementation of the VibeVoice diffusion head."""
+
+    def __init__(
+        self,
+        hidden_size: int = 2048,
+        head_layers: int = 6,
+        head_ffn_ratio: float = 4.0,
+        rms_norm_eps: float = 1e-5,
+        latent_size: int = 528,
+    ):
+        super().__init__()
+        self.cond_dim = hidden_size
+
+        self.noisy_images_proj = nn.Linear(latent_size, hidden_size, bias=False)
+        self.cond_proj = nn.Linear(hidden_size, self.cond_dim, bias=False)
+        self.t_embedder = TimestepEmbedder(self.cond_dim)
+
+        ffn_dim = int(hidden_size * head_ffn_ratio)
+
+        self.layers = [
+            HeadLayer(
+                embed_dim=hidden_size,
+                ffn_dim=ffn_dim,
+                cond_dim=self.cond_dim,
+                norm_eps=rms_norm_eps,
+            )
+            for _ in range(head_layers)
+        ]
+
+        self.final_layer = FinalLayer(
+            hidden_size=hidden_size,
+            output_size=latent_size,
+            cond_size=self.cond_dim,
+            norm_eps=rms_norm_eps,
+        )
+
+    def __call__(
+        self,
+        noisy_images: mx.array,
+        timesteps: mx.array,
+        condition: mx.array,
+    ) -> mx.array:
+        x = self.noisy_images_proj(noisy_images)
+        t = self.t_embedder(timesteps)
+        condition = self.cond_proj(condition)
+        c = condition + t
+
+        for layer in self.layers:
+            x = layer(x, c)
+
+        return self.final_layer(x, c)

@@ -1,0 +1,6 @@
+torch>=2.2.0
+torchaudio>=2.2.0
+hume-tada
+transformers<5
+mlx>=0.22.0
+safetensors

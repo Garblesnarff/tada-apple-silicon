@@ -2,3 +2,8 @@ torch>=2.2.0
 torchaudio>=2.2.0
 hume-tada
 transformers<5
+
+# MLX backend (optional — for generate_mlx.py)
+# Uncomment these for Metal GPU acceleration:
+# mlx>=0.22.0
+# safetensors
