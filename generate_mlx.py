@@ -2,7 +2,7 @@
 """TADA TTS inference using MLX on Apple Silicon Metal GPU.
 
 This is the fast path — runs the LLM and decoder on Metal GPU via MLX.
-Achieves sub-real-time performance (0.82x RTF for long text) on M4 Mac Mini.
+Achieves 2x faster than real-time (0.45x RTF) on M4 Mac Mini.
 
 Requires one-time weight conversion:
     python -m mlx_tada.convert_weights --output-dir ./mlx-weights
@@ -62,14 +62,17 @@ def main():
     parser.add_argument(
         "--flow-steps",
         type=int,
-        default=5,
-        help="Flow matching steps: 20=best, 10=good, 5=fast+good (default: 5)",
+        default=2,
+        help="Flow matching steps: 20=best, 5=good, 2=fast+good (default: 2)",
     )
     parser.add_argument(
         "--text-temperature", type=float, default=0.6, help="Text sampling temperature (default: 0.6)"
     )
     parser.add_argument(
-        "--noise-temperature", type=float, default=0.9, help="Noise temperature (default: 0.9)"
+        "--noise-temperature", type=float, default=0.6, help="Noise temperature (default: 0.6)"
+    )
+    parser.add_argument(
+        "--cfg-scale", type=float, default=2.0, help="Acoustic CFG scale (default: 2.0)"
     )
     parser.add_argument(
         "--transition-steps",
@@ -78,8 +81,12 @@ def main():
         help="Voice transition blending steps (default: 5)",
     )
     parser.add_argument(
-        "--quantize", action="store_true",
-        help="Quantize LLM to 4-bit (faster, minimal quality loss)"
+        "--quantize", action="store_true", default=True,
+        help="Quantize LLM to 4-bit (default: enabled, use --no-quantize to disable)"
+    )
+    parser.add_argument(
+        "--no-quantize", action="store_true",
+        help="Disable 4-bit LLM quantization"
     )
     parser.add_argument(
         "--pytorch-decoder", action="store_true",
@@ -102,7 +109,7 @@ def main():
     # Load hybrid model
     inference = HybridTadaInference(
         mlx_weights_dir=args.weights_dir,
-        quantize_llm=args.quantize,
+        quantize_llm=args.quantize and not args.no_quantize,
         use_mlx_decoder=not args.pytorch_decoder,
     )
 
@@ -118,10 +125,16 @@ def main():
 
     # Generation config
     config = GenerateConfig(
+        text_do_sample=False,
         text_temperature=args.text_temperature,
         noise_temperature=args.noise_temperature,
         num_flow_matching_steps=args.flow_steps,
-        acoustic_cfg_scale=1.6,
+        acoustic_cfg_scale=args.cfg_scale,
+        duration_cfg_scale=1.0,
+        cfg_schedule="constant",
+        time_schedule="logsnr",
+        num_acoustic_candidates=1,
+        negative_condition_source="negative_step_output",
     )
 
     # Warmup

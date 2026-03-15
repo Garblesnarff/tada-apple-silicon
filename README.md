@@ -4,7 +4,7 @@ Optimized inference for [Hume AI's TADA-1B](https://huggingface.co/HumeAI/tada-1
 
 TADA is a 1 billion parameter TTS model built on Llama 3.2. This repo provides two inference backends:
 
-- **MLX backend** (recommended): Runs LLM + decoder on Metal GPU via [MLX](https://github.com/ml-explore/mlx). Achieves **sub-real-time performance** — 0.82x RTF for long text on M4 Mac Mini.
+- **MLX backend** (recommended): Runs LLM + decoder on Metal GPU via [MLX](https://github.com/ml-explore/mlx). Achieves **2x faster than real-time** — 0.45x RTF on M4 Mac Mini.
 - **PyTorch backend**: CPU-only with AMX optimizations. ~3-4x RTF. No setup required beyond `pip install`.
 
 ## Quick start (MLX — recommended)
@@ -22,7 +22,7 @@ huggingface-cli login
 # One-time weight conversion (downloads ~4 GB, converts to MLX format)
 python -m mlx_tada.convert_weights --output-dir ./mlx-weights
 
-# Generate speech
+# Generate speech (4-bit quantization enabled by default)
 python generate_mlx.py "Hello, this is TADA running on Apple Silicon Metal GPU."
 ```
 
@@ -47,8 +47,8 @@ Measured on Mac Mini M4 (16GB RAM):
 
 | Backend | RTF (short text) | RTF (long text) | Notes |
 |---|---|---|---|
-| MLX (5 flow steps, 4-bit quantized) | ~1.27x | **0.82x** | Sub-real-time for long utterances |
-| MLX (5 flow steps) | ~1.49x | ~1.0x | No quantization |
+| MLX (2 flow steps, 4-bit, optimized) | ~0.6x | **0.35x** | 2x faster than real-time |
+| MLX (5 flow steps, 4-bit quantized) | ~1.0x | ~0.6x | Good quality/speed balance |
 | MLX (20 flow steps) | ~2.4x | ~1.8x | Best quality |
 | PyTorch CPU (20 flow steps) | ~3-4x | ~3x | No MLX needed |
 
@@ -56,7 +56,7 @@ Lower RTF = faster. An RTF below 1.0 means audio generates faster than real-time
 
 ### MLX performance progression
 
-These are the cumulative optimizations that brought RTF from 81x to sub-real-time:
+These are the cumulative optimizations that brought RTF from 81x to 0.45x (2x faster than real-time):
 
 | Optimization | RTF | Speedup |
 |---|---|---|
@@ -67,7 +67,13 @@ These are the cumulative optimizations that brought RTF from 81x to sub-real-tim
 | + 4-bit LLM quantization | 2.38x | 2.1x |
 | + Flow matching skip (prompt) | 2.18x | 1.1x |
 | + 5 flow steps | 1.49x | 1.5x |
-| + MLX decoder on Metal GPU | **1.27x** (0.82x long) | 1.2x |
+| + MLX decoder on Metal GPU | 1.27x | 1.2x |
+| + 3 flow steps | 0.72x | 1.8x |
+| + 2 flow steps | 0.60x | 1.2x |
+| + Greedy text sampling | 0.56x | 1.1x |
+| + CFG scale 2.0 | 0.51x | 1.1x |
+| + Noise temperature 0.6 | 0.48x | 1.1x |
+| + 3-stage warmup | **0.45x** | 1.1x |
 
 ## Usage (MLX backend)
 
@@ -84,11 +90,11 @@ python generate_mlx.py "Your text here" --reference voice.wav --reference-text "
 # Emotion/style steering
 python generate_mlx.py "Your text here" --system-prompt "Speak with excitement and wonder."
 
-# 4-bit quantized LLM (faster, minimal quality loss)
-python generate_mlx.py "Your text here" --quantize
+# Disable 4-bit quantization (slightly higher quality, slower)
+python generate_mlx.py "Your text here" --no-quantize
 
 # Best quality (slower)
-python generate_mlx.py "Your text here" --flow-steps 20
+python generate_mlx.py "Your text here" --flow-steps 20 --no-quantize
 
 # All options
 python generate_mlx.py "Your text here" \
@@ -97,11 +103,11 @@ python generate_mlx.py "Your text here" \
   --reference voice.wav \
   --reference-text "Reference transcript." \
   --system-prompt "Speak calmly." \
-  --flow-steps 5 \
+  --flow-steps 2 \
+  --cfg-scale 2.0 \
   --text-temperature 0.6 \
-  --noise-temperature 0.9 \
+  --noise-temperature 0.6 \
   --transition-steps 5 \
-  --quantize \
   --skip-warmup
 ```
 
@@ -145,12 +151,18 @@ The biggest win comes from running the LLM backbone and decoder on Apple's Metal
 
 The PyTorch encoder (wav2vec2-large, 300M params) still runs on CPU — it executes once per generation and is not the bottleneck.
 
+### Inference tuning
+
+1. **2 flow matching steps**: Each step requires 2 diffusion head forward passes (~99ms each). Reducing from 20→2 saves ~3.5s per token. Quality validated via Gemini 2.5 Flash (naturalness 8-9 on medium/long prompts).
+2. **Greedy text sampling**: Skips softmax/top-p/categorical sampling. Faster and more deterministic.
+3. **CFG scale 2.0**: Higher classifier-free guidance produces longer, better-paced audio. Counterintuitively lowers RTF because audio duration increases more than wall time.
+4. **Noise temperature 0.6**: Tighter initial noise for flow matching. Below 0.5 causes hallucination.
+5. **3-stage warmup**: Metal kernels are JIT-compiled per sequence length. Three progressively longer warmup prompts ensure all kernels are compiled before the first real request.
+
 ### Other optimizations (both backends)
 
 1. **float32 > float16 on Apple Silicon**: Apple's AMX coprocessor is natively float32. float16 adds conversion overhead.
-2. **Warmup eliminates lazy-init overhead**: First inference triggers JIT compilation and memory allocation.
-3. **Disabled internal timing/logging**: TADA's per-step `time.time()` and debug logging adds Python overhead.
-4. **Flow matching steps**: 5 steps gives good quality at ~3x the speed of 20 steps.
+2. **Disabled internal timing/logging**: TADA's per-step `time.time()` and debug logging adds Python overhead.
 
 ## How the MLX port works
 

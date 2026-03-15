@@ -374,7 +374,24 @@ class HybridTadaInference:
         return wav.squeeze(0, 1)
 
     def warmup(self, prompt, config: GenerateConfig = None):
-        """Run a short warmup generation to prime caches."""
-        print("Warmup...")
+        """Run warmup generations to prime Metal kernel caches.
+
+        A short prompt alone doesn't compile kernels for longer sequences.
+        Running progressively longer prompts ensures steady-state performance
+        from the first real generation.
+        """
+        print("Warmup (3-stage)...")
         _, _ = self.generate(prompt, "Hi.", num_transition_steps=0, config=config)
+        _, _ = self.generate(
+            prompt,
+            "This is a warmup sentence to compile Metal kernels for longer sequences.",
+            num_transition_steps=5,
+            config=config,
+        )
+        _, _ = self.generate(
+            prompt,
+            "And this is a third warmup prompt that is even longer to ensure the decoder kernels are also compiled for various audio lengths and durations.",
+            num_transition_steps=5,
+            config=config,
+        )
         print("Warmup complete")
